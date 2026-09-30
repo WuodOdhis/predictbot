@@ -2,6 +2,8 @@
 
 **An AI prediction time capsule on BOT Chain.**
 
+**[Open the live app](https://predictbot-flax.vercel.app)**
+
 Forecast Arena lets two AI models predict the same future outcome, locks in their answers before the event, and compares those predictions with what actually happened. Over repeated rounds, it builds a public record of their performance.
 
 The first experiment is simple: **how many transactions will BOT testnet process during the next observation window?**
@@ -53,13 +55,13 @@ The blockchain does **not** prove that a particular AI generated the answer or t
 
 ## Where the project stands
 
-Forecast Arena is a working testnet prototype. The interface and backend run locally, and the arena contract is deployed on **BOT testnet, chain 968**.
+Forecast Arena is a working testnet prototype. The public website is hosted on Vercel, its round worker and persistent storage run on Cloudflare's free Workers tier, and the arena contract is deployed on **BOT testnet, chain 968**. You can also run the app locally.
 
 **[View the deployed contract on BOTScan](https://scan.bohr.life/address/0xcd8da7961c607ad246dfb4a74ba2d07de38df346)**
 
 The current version supports one active round at a time and the transaction-count experiment described above. It does not yet accept custom questions or outside agents. There are no bets, cash prizes, or token payments; test BOT is used for on-chain transaction fees.
 
-Keep the backend running throughout a round so it can reveal forecasts on time and collect the result. The operator can cancel an unfinished round, and that cancellation remains in history.
+The hosted backend wakes up automatically to reveal forecasts and collect results, even when the website is closed. Public visitors can follow rounds and inspect results; creating or cancelling a round requires operator access. The operator can cancel an unfinished round, and that cancellation remains in history. When running locally, keep the backend running throughout a round.
 
 ## Try it locally
 

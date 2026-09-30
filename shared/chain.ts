@@ -1,0 +1,224 @@
+import {
+  createPublicClient,
+  createWalletClient,
+  defineChain,
+  http,
+  isAddress,
+  parseAbi,
+  type Hex,
+} from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import type { Evidence } from './domain.js';
+
+export interface ChainConfig {
+  BOT_RPC_URL?: string;
+  DEPLOYER_PRIVATE_KEY?: string;
+  ARENA_CONTRACT_ADDRESS?: string;
+}
+
+export function createChain(config: ChainConfig) {
+  const botTestnet = defineChain({
+    id: 968,
+    name: 'BOT Testnet',
+    nativeCurrency: { name: 'Test BOT', symbol: 'tBOT', decimals: 18 },
+    rpcUrls: { default: { http: [config.BOT_RPC_URL || 'https://rpc.bohr.life'] } },
+    blockExplorers: { default: { name: 'BOTScan', url: 'https://scan.bohr.life' } },
+    testnet: true,
+  });
+  const rpc = createPublicClient({
+    chain: botTestnet,
+    transport: http(undefined, {
+      timeout: 15_000,
+      retryCount: 2,
+      batch: { batchSize: 128, wait: 5 },
+    }),
+  });
+  const abi = parseAbi([
+    'function operator() view returns (address)',
+    'function nextRoundId() view returns (uint256)',
+    'function rounds(uint256) view returns (bytes32 rulesHash, uint64 commitDeadline, uint64 revealDeadline, uint64 observationStart, uint64 observationEnd, bool settled, bool cancelled, uint256 outcome, bytes32 evidenceHash)',
+    'function predictions(uint256, bytes32) view returns (address submitter, bytes32 commitment, uint256 value, bool revealed)',
+    'function createRound(bytes32, uint64, uint64, uint64, uint64) returns (uint256)',
+    'function commit(uint256, bytes32, bytes32)',
+    'function reveal(uint256, bytes32, uint256, bytes32)',
+    'function settle(uint256, uint256, bytes32)',
+    'function cancel(uint256)',
+  ]);
+  function signer() {
+    const key = config.DEPLOYER_PRIVATE_KEY;
+    if (!key || !/^0x[0-9a-fA-F]{64}$/.test(key))
+      throw new Error('Configure a valid testnet DEPLOYER_PRIVATE_KEY in .env.');
+    const account = privateKeyToAccount(key as Hex);
+    return createWalletClient({ account, chain: botTestnet, transport: http() });
+  }
+  function contractAddress(): Hex {
+    const address = config.ARENA_CONTRACT_ADDRESS;
+    if (!address || !isAddress(address))
+      throw new Error('Deploy the contract and configure ARENA_CONTRACT_ADDRESS.');
+    return address;
+  }
+  async function assertTestnet() {
+    if ((await rpc.getChainId()) !== 968) throw new Error('RPC is not BOT testnet (968).');
+  }
+  async function assertOperator(address: Hex) {
+    await assertTestnet();
+    const wallet = signer();
+    const owner = await rpc.readContract({ address, abi, functionName: 'operator' });
+    if (owner.toLowerCase() !== wallet.account.address.toLowerCase())
+      throw new Error("Configured wallet is not this contract's operator.");
+  }
+  async function send(
+    address: Hex,
+    functionName: 'createRound' | 'commit' | 'reveal' | 'settle' | 'cancel',
+    args: readonly unknown[],
+    onHash: (hash: Hex) => void,
+  ) {
+    // Simulate before signing; the server only sends to the configured arena contract.
+    const wallet = signer();
+    const { request } = await rpc.simulateContract({
+      address,
+      abi,
+      functionName,
+      args,
+      account: wallet.account,
+    } as any);
+    const hash = await wallet.writeContract(request);
+    onHash(hash);
+    const receipt = await rpc.waitForTransactionReceipt({
+      hash,
+      confirmations: 2,
+      timeout: 45_000,
+    });
+    if (receipt.status !== 'success') throw new Error('Contract transaction reverted.');
+    return hash;
+  }
+  async function recentStats() {
+    await assertTestnet();
+    const latest = await rpc.getBlock();
+    const size = latest.number < 24n ? Number(latest.number) + 1 : 24;
+    const blocks = [];
+    const recent = await Promise.all(
+      Array.from({ length: size }, (_, i) =>
+        rpc.getBlock({ blockNumber: latest.number - BigInt(size - 1 - i) }),
+      ),
+    );
+    for (const block of recent) {
+      blocks.push({
+        number: block.number.toString(),
+        timestamp: Number(block.timestamp),
+        transactions: block.transactions.length,
+      });
+    }
+    const elapsed = Math.max(1, blocks.at(-1)!.timestamp - blocks[0].timestamp);
+    const counts = blocks.slice(1).map((b) => b.transactions);
+    const total = counts.reduce((a, b) => a + b, 0);
+    const sorted = [...counts].sort((a, b) => a - b);
+    return {
+      blocks,
+      blockNumber: latest.number.toString(),
+      blockHash: latest.hash,
+      blockTimestamp: Number(latest.timestamp),
+      meanRate: total / elapsed,
+      medianRate: ((sorted[Math.floor(sorted.length / 2)] || 0) * counts.length) / elapsed,
+    };
+  }
+
+  async function lowerBoundTimestamp(
+    target: number,
+    latest: bigint,
+    timestamp: (n: bigint) => Promise<number>,
+  ): Promise<bigint> {
+    let lo = 0n,
+      hi = latest + 1n;
+    while (lo < hi) {
+      const mid = (lo + hi) / 2n;
+      if ((await timestamp(mid)) < target) lo = mid + 1n;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  async function collectEvidence(start: number, end: number): Promise<Evidence> {
+    await assertTestnet();
+    const latest = await rpc.getBlock({ blockTag: 'latest' });
+    // Keep a 12-block buffer so the end boundary is not at the unstable tip.
+    if (latest.number < 12n) throw new Error('Waiting for testnet confirmations.');
+    const safe = latest.number - 12n;
+    const safeBlock = await rpc.getBlock({ blockNumber: safe });
+    if (Number(safeBlock.timestamp) < end)
+      throw new Error('Waiting for the observation end to have 12 confirmations.');
+    const timestamp = async (n: bigint) =>
+      Number((await rpc.getBlock({ blockNumber: n })).timestamp);
+    const [first, boundary] = await Promise.all([
+      lowerBoundTimestamp(start, safe, timestamp),
+      lowerBoundTimestamp(end, safe, timestamp),
+    ]);
+    if (boundary - first > 6000n)
+      throw new Error('Observation range exceeds prototype limit of 6,000 blocks.');
+    const previous = first > 0n ? await rpc.getBlock({ blockNumber: first - 1n }) : null;
+    const endBlock = await rpc.getBlock({ blockNumber: boundary });
+    const blocks: Evidence['blocks'] = [];
+    let parent = previous?.hash;
+    for (let n = first; n < boundary; n += 128n) {
+      const batch = Array.from(
+        { length: Number(boundary - n < 128n ? boundary - n : 128n) },
+        (_, i) => n + BigInt(i),
+      );
+      const results = await Promise.all(batch.map((blockNumber) => rpc.getBlock({ blockNumber })));
+      for (const b of results) {
+        if (parent && b.parentHash !== parent)
+          throw new Error('Chain changed during collection; retrying.');
+        if (Number(b.timestamp) < start || Number(b.timestamp) >= end)
+          throw new Error('Block timestamps changed; retrying.');
+        blocks.push({
+          number: b.number.toString(),
+          hash: b.hash,
+          timestamp: Number(b.timestamp),
+          transactions: b.transactions.length,
+        });
+        parent = b.hash;
+      }
+    }
+    if (parent && endBlock.parentHash !== parent)
+      throw new Error('End boundary changed; retrying.');
+    const recheck = await rpc.getBlock({ blockNumber: boundary });
+    if (recheck.hash !== endBlock.hash) throw new Error('Canonical boundary changed; retrying.');
+    return {
+      schema: 'forecast-arena/outcome-v1',
+      chainId: 968,
+      observationStart: start,
+      observationEnd: end,
+      collectedAt: Math.floor(Date.now() / 1000),
+      source: config.BOT_RPC_URL ? 'Configured BOT testnet RPC' : 'https://rpc.bohr.life',
+      method:
+        'Count every transaction in canonical blocks with start <= block.timestamp < end; reverted transactions included. End boundary has at least 12 successor blocks.',
+      previousBlock: previous
+        ? {
+            number: previous.number.toString(),
+            hash: previous.hash,
+            timestamp: Number(previous.timestamp),
+          }
+        : null,
+      endBoundary: {
+        number: endBlock.number.toString(),
+        hash: endBlock.hash,
+        timestamp: Number(endBlock.timestamp),
+      },
+      blocks,
+      outcome: blocks.reduce((sum, b) => sum + b.transactions, 0),
+    };
+  }
+  return {
+    botTestnet,
+    rpc,
+    abi,
+    signer,
+    contractAddress,
+    assertTestnet,
+    assertOperator,
+    send,
+    recentStats,
+    lowerBoundTimestamp,
+    collectEvidence,
+  };
+}

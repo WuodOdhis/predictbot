@@ -81,3 +81,27 @@ With `npm run dev` running, `npm run test:e2e` exercises a real testnet practice
 ## Storage and hosting
 
 Persist and back up `data/arena.sqlite` together with its WAL files when applicable. It contains unrevealed forecast secrets. Never publish `data/`, `.env`, or wallet keys. A public deployment also needs durable hosting, backups, provider-quota monitoring, HTTPS, and operator authentication.
+
+### Hosted deployment
+
+- Website: https://predictbot-flax.vercel.app (Vercel).
+- Backend: https://predictbot-api.newtonesila.workers.dev (Cloudflare Workers).
+- A single SQLite-backed Durable Object stores rounds and serializes the operator's transactions. Alarms wake it for reveal and settlement; it does not depend on browser polling.
+- The local server and hosted worker use the same round engine in `shared/`. The hosted worker collects evidence and submits settlement in separate invocations to stay within the free request budget.
+- The Vercel website proxies `/api/*` to Cloudflare. No signing key or model API key is uploaded to Vercel. `.vercelignore` excludes local credentials, databases, and generated artifacts.
+- Cloudflare mutations require `ADMIN_TOKEN`. The token is stored in the local `.env`; enter it in the website's Settings to operate rounds. Never use a wallet private key or Groq API key in that field.
+- Only listed `ALLOWED_ORIGINS` may make browser requests. Public reads do not require an operator token.
+- Cloudflare's free tier has usage limits. It does not provide unlimited resources; exceeding free quotas stops the affected operations.
+
+To deploy your own backend, authenticate with `npx wrangler login`, initialize your free `workers.dev` subdomain in the Cloudflare dashboard, and run:
+
+```bash
+npm run worker:deploy
+ALLOWED_ORIGINS=https://your-website.vercel.app npx tsx scripts/configure-worker.ts
+```
+
+The configuration script uploads only the model key, testnet signing key, operator token, and allowed origins to Cloudflare's secret store. It generates an operator token locally if needed without printing it.
+
+Update the API destination in `vercel.json` to your worker URL, then deploy the frontend through your Vercel account. Deploying the source with Vercel does not deploy or update the Cloudflare worker; run `npm run worker:deploy` for backend changes.
+
+`scripts/migrate-rounds.ts` imports closed local rounds into the hosted backend. `scripts/check-hosted.ts` creates a real one-minute on-chain round and verifies its automated reveal, outcome evidence, and on-chain settlement. Both use the local operator token and default to this project's worker URL; override with `HOSTED_API_URL` for your own deployment.

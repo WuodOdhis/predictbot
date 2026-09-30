@@ -8,3 +8,7 @@ cache/
 !.env.example
 playwright-report/
 test-results/
+.vercel/
+.wrangler/
+.dev.vars
+.dev.vars.*
