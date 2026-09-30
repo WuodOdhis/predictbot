@@ -1,80 +1,77 @@
 # Forecast Arena
 
-Sealed AI forecasts on BOT testnet. The first experiment predicts transaction counts over fixed observation windows. No betting, deposits, or token issuance.
+**An AI prediction time capsule on BOT Chain.**
 
-## Run locally
+Forecast Arena lets two AI models predict the same future outcome, locks in their answers before the event, and compares those predictions with what actually happened. Over repeated rounds, it builds a public record of their performance.
 
-Requires Node.js 20+, npm, and Foundry for contracts.
-Backend tests also use Foundry's `anvil` to verify real signed transactions on an isolated local EVM.
+The first experiment is simple: **how many transactions will BOT testnet process during the next observation window?**
+
+Instead of judging an AI by a convincing explanation, the arena gives it a question with a measurable answer. You can follow the round, see both forecasts when they are revealed, and check which model came closest.
+
+## How a round works
+
+1. **Choose a window.** Open a round with a 1-, 5-, or 10-minute observation period.
+2. **Both models make a forecast.** They receive the same recent network activity data and the same instructions.
+3. **The answers are sealed.** A digital fingerprint of each prediction is recorded on BOT testnet. The submitted prediction cannot be replaced with a different answer when it is revealed.
+4. **The predictions are revealed.** Submissions close, then each model's predicted transaction count and explanation become visible before observation starts.
+5. **The arena watches the outcome.** It counts the transactions during the agreed period and publishes the supporting block records.
+6. **The forecasts are scored.** The closest prediction wins. Ties share the win, and the results feed into the leaderboard.
+
+For example, if one model predicts 12 transactions and another predicts 18, an actual count of 15 gives both an error of 3. They tie. This is an illustration of scoring, not a recorded round.
+
+A one-minute on-chain round takes roughly five minutes overall because sealing, revealing, and confirming the result also take time.
+
+## What you can explore
+
+| View | What you will find |
+| --- | --- |
+| **Arena** | The current question, round countdown, sealed or revealed predictions, model explanations, and the final result. |
+| **Activity** | A timeline of commitments, reveals, settlement, and missed deadlines. |
+| **Round history** | Previous rounds, their outcomes, and cancelled rounds. |
+| **Leaderboard** | Average prediction error, wins, scored rounds, and missed reveals for each participant. Lower error ranks higher. |
+| **Network pulse** | Live samples of BOT testnet activity and a link to its explorer. |
+| **Settings** | The status of the model provider, signing wallet, and arena contract. |
+
+Every round has published rules. Once it is settled, you can also inspect the block evidence used to calculate its outcome. Missed reveals remain visible rather than disappearing from the record.
+
+## The competitors
+
+The default AI competitors are **GPT-OSS 120B** and **GPT-OSS 20B**, accessed through Groq. Both work from the same supplied data; neither is given extra browsing or live-data tools.
+
+There are two ways to run the arena:
+
+- **On-chain AI:** real model forecasts, with their sealed submissions and settlement recorded on BOT testnet.
+- **Local practice:** two statistical baselines, called Recent mean and Block median, forecast against real testnet outcomes. This mode works without model credentials or a funded wallet. Its commitments are stored locally, and its results have a separate leaderboard.
+
+## Why use a blockchain?
+
+A prediction is only meaningful if it was made before the outcome was known.
+
+BOT testnet gives each submitted commitment a public transaction record. When the answer is revealed, it can be checked against that earlier commitment. This makes it possible to detect an answer that was changed after submission.
+
+The blockchain does **not** prove that a particular AI generated the answer or that the reported outcome is correct. The current app's backend runs the models and reports the outcome, with supporting records available for inspection.
+
+## Where the project stands
+
+Forecast Arena is a working testnet prototype. The interface and backend run locally, and the arena contract is deployed on **BOT testnet, chain 968**.
+
+**[View the deployed contract on BOTScan](https://scan.bohr.life/address/0xcd8da7961c607ad246dfb4a74ba2d07de38df346)**
+
+The current version supports one active round at a time and the transaction-count experiment described above. It does not yet accept custom questions or outside agents. There are no bets, cash prizes, or token payments; test BOT is used for on-chain transaction fees.
+
+Keep the backend running throughout a round so it can reveal forecasts on time and collect the result. The operator can cancel an unfinished round, and that cancellation remains in history.
+
+## Try it locally
+
+With Node.js 20+ and npm installed:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open http://localhost:5173. The API listens on http://127.0.0.1:3001. Both servers are local-only by default.
+Open **http://localhost:5173**, choose **New round**, select **Local practice**, and open a one-minute round. Practice mode still needs a working connection to BOT testnet.
 
-Without credentials, choose **Local practice**. Two clearly labelled statistical baselines forecast from real recent BOT testnet blocks. Commitments are recorded locally, while outcomes are collected from the real testnet. These are not AI or on-chain rounds.
+To enable real AI rounds, you will need a Groq API key, a funded testnet wallet, and an arena contract controlled by that wallet. The existing deployed contract is controlled by this project's operator wallet; a new wallet needs its own deployment.
 
-An initial one-minute practice round takes about two minutes: 20 seconds for commits, 20 seconds for reveals, 60 seconds for observation, then block confirmations and evidence collection. Keep the backend running through the reveal deadline. SQLite preserves rounds and secrets across restarts, but a restart cannot recover a missed deadline.
-
-## Enable on-chain AI rounds
-
-Create `.env` using the variable names in `.env.example`:
-
-- `GROQ_API_KEY`: generate your own free-plan key at https://console.groq.com/keys.
-- `DEPLOYER_PRIVATE_KEY`: a dedicated BOT **testnet** account, prefixed with `0x`. Fund its public address at https://faucet.botchain.ai/basic.
-- `ARENA_CONTRACT_ADDRESS`: the address produced by deployment below.
-- `ADMIN_TOKEN`: optional operator token for authenticated controls. Required before exposing controls through a remote proxy. The Settings screen accepts this access token, not provider or wallet secrets.
-
-The default competitors are `openai/gpt-oss-120b` and `openai/gpt-oss-20b`. Override with `GROQ_MODEL_A` / `GROQ_MODEL_B` if your account's catalog changes. Both receive identical context, a versioned prompt, and temperature 0. API responses identify the reported model; this is operator-attributed provenance, not cryptographic proof of model execution.
-
-```bash
-npm run contracts:build
-npm run deploy:testnet
-```
-
-Deployment signs a transaction on chain **968 only** and prints its explorer link and contract address. Set `ARENA_CONTRACT_ADDRESS` locally, then restart the backend. The wallet must match the contract's immutable operator. Deployment is not performed automatically at startup.
-
-Open an **On-chain AI** round. The backend requests both forecasts before opening the round, then allows 120 seconds to commit and 90 seconds to reveal. Observation starts after reveal closes. A single worker serializes operator transactions. Run one backend instance against the database and operator wallet.
-
-```bash
-npm run build
-npm start
-```
-
-This serves the built interface and API together at http://127.0.0.1:3001.
-
-## Rules and verification
-
-- A round's rules fix its chain, deadlines, observation interval, model metadata, shared input sample, prompt version, evaluator, and scoring.
-- Outcomes count **all transactions, including reverted ones**, in canonical blocks whose timestamps satisfy `observationStart <= timestamp < observationEnd`.
-- Collection waits until the end boundary has at least 12 successor blocks. This is a confirmation buffer, not an independently verified finality guarantee.
-- The prototype's observation window is limited to 1, 5, or 10 minutes, and collection is capped at 6,000 blocks.
-- Lowest absolute error wins each round. Ties share wins. The leaderboard separates statistical baselines from AI rounds, groups reported model versions separately, and displays scored rounds and missed reveals.
-- Missing reveals are unscored, counted as misses, and remain visible. Cancelled rounds remain in history and do not count toward scores. This first leaderboard is descriptive, not a manipulation-resistant reputation mechanism.
-
-Commitments use:
-
-```text
-keccak256(abi.encode(chainId, contractAddress, roundId, agentId, submitter, prediction, randomSalt))
-agentId = keccak256(UTF8(agent identifier))
-```
-
-`GET /api/rounds` hides prediction values, reasoning, and salts until a successful reveal is recorded. Afterwards, it exposes `revealSalt` and the commitment domain for independent recomputation. Secrets are never placed in rules or frontend configuration.
-
-`GET /api/rounds/:id/rules` returns the exact JSON bytes hashed into `rulesHash`. `GET /api/rounds/:id/evidence` returns the exact settled evidence JSON bytes hashed into `evidenceHash`. Hash UTF-8 response bytes using keccak256. Evidence lists block numbers, hashes, timestamps, transaction counts, boundary blocks, and the total. Verify against an independent RPC if needed.
-
-**Trust model:** the operator submits outcomes and can cancel unsettled rounds. A hash anchors a record; it does not prove its contents are true. RPC counts, model attribution, execution, and outcome publication rely on the operator. There is no trustless oracle or dispute mechanism in this prototype. The contract does not hold funds.
-
-## Checks
-
-```bash
-npm test
-npm run contracts:test
-npm run build
-```
-
-With `npm run dev` running, `npm run test:e2e` exercises a real testnet practice round, verifies commitments and evidence digests, checks desktop/mobile rendering, and tests cancellation. It uses system Chrome at `/usr/bin/google-chrome`; override with `CHROME_PATH`. Run it only with no active round, since it creates persistent practice records.
-
-Persist and back up `data/arena.sqlite` together with its WAL files when applicable. It contains unrevealed forecast secrets. Never publish `data/`, `.env`, or wallet keys. A public deployment also needs durable hosting, backups, provider-quota monitoring, HTTPS, and operator authentication.
+For configuration, deployment, testing, and verification details, see the **[Developer Guide](docs/DEVELOPMENT.md)**.
