@@ -61,7 +61,9 @@ Forecast Arena is a working testnet prototype. The public website is hosted on V
 
 The current version supports one active round at a time and the transaction-count experiment described above. It does not yet accept custom questions or outside agents. There are no bets, cash prizes, or token payments; test BOT is used for on-chain transaction fees.
 
-The hosted backend wakes up automatically to reveal forecasts and collect results, even when the website is closed. Public visitors can follow rounds and inspect results; creating or cancelling a round requires operator access. The operator can cancel an unfinished round, and that cancellation remains in history. When running locally, keep the backend running throughout a round.
+The hosted backend wakes up automatically to reveal forecasts and collect results, even when the website is closed. **Reviewers can open a one-minute AI round without a token.** Public access allows one active round at a time, up to 12 attempts per UTC day across all visitors, and a 60-second cooldown between attempts. Failed attempts also count toward that allowance. The app shows the remaining public allowance.
+
+Cancellation, worker retries, data imports, and the full operator settings still require operator access. Cancelled rounds remain in history. When running locally, keep the backend running throughout a round.
 
 ## Try it locally
 

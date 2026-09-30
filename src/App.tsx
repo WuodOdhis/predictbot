@@ -31,6 +31,15 @@ interface Status {
   network: { connected: boolean; blockNumber?: string; timestamp?: number };
   configured: { groq: boolean; wallet: boolean; contract: boolean };
   authRequired: boolean;
+  permissions?: { operator: boolean };
+  publicRounds?: {
+    enabled: boolean;
+    mode: 'onchain';
+    duration: number;
+    dailyLimit: number;
+    remaining: number;
+    retryAt: number | null;
+  };
   contract: string | null;
   serverTime: number;
   samples: { block: string; timestamp: number; transactions: number }[];
@@ -160,12 +169,17 @@ export default function App() {
   const [clock, setClock] = useState(Date.now());
   const [offset, setOffset] = useState(0);
   const [token, setToken] = useState(() => sessionStorage.getItem('arena-token') || '');
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
   const [boardMode, setBoardMode] = useState<'practice' | 'onchain'>('onchain');
   const [historyMode, setHistoryMode] = useState('all');
   const [detail, setDetail] = useState<'forecasts' | 'activity'>('forecasts');
   const refresh = async () => {
     try {
-      const [s, r] = await Promise.all([fetch('/api/status'), fetch('/api/rounds')]);
+      const headers: HeadersInit = tokenRef.current
+        ? { Authorization: `Bearer ${tokenRef.current}` }
+        : {};
+      const [s, r] = await Promise.all([fetch('/api/status', { headers }), fetch('/api/rounds')]);
       if (!s.ok || !r.ok) throw new Error('Arena backend is unavailable.');
       const next = (await s.json()) as Status;
       setStatus(next);
@@ -251,17 +265,36 @@ export default function App() {
     rounds.find((r) => r.phase === 'SETTLED') ||
     rounds[0];
   const ready = status && Object.values(status.configured).every(Boolean);
+  const operator = status?.permissions?.operator ?? !status?.authRequired;
+  const reviewer = Boolean(status?.publicRounds) && !operator;
+  const publicAccess = status?.publicRounds;
+  const publicCooldown =
+    reviewer && publicAccess?.retryAt
+      ? Math.max(0, Math.ceil((publicAccess.retryAt - clock - offset) / 1000))
+      : 0;
+  const publicBlocked =
+    reviewer && (!publicAccess?.enabled || !publicAccess.remaining || publicCooldown > 0);
+  useEffect(() => {
+    if (reviewer) {
+      setMode('onchain');
+      setDuration(60);
+    }
+  }, [reviewer]);
   const openRound = async () => {
     setBusy(true);
     setError('');
     try {
-      const r = await request('/api/rounds', { mode, duration });
+      const r = await request(
+        '/api/rounds',
+        reviewer ? { mode: 'onchain', duration: 60 } : { mode, duration },
+      );
       setSelected(r.id);
       setView('arena');
       setModal(false);
       await refresh();
     } catch (e) {
       setError((e as Error).message);
+      await refresh();
     } finally {
       setBusy(false);
     }
@@ -439,13 +472,33 @@ export default function App() {
             </div>
             <button
               className="primary-button"
-              disabled={Boolean(active) || loading}
+              disabled={Boolean(active) || loading || publicBlocked}
               onClick={() => setModal(true)}
             >
               <Plus size={17} />
               New round
             </button>
           </div>
+          {reviewer && publicAccess && (
+            <div className="public-capacity">
+              <span>
+                Public rounds{' '}
+                <b>
+                  {publicAccess.remaining} / {publicAccess.dailyLimit}
+                </b>{' '}
+                remaining today
+              </span>
+              <span>
+                {!publicAccess.enabled
+                  ? 'AI rounds unavailable'
+                  : !publicAccess.remaining
+                    ? 'Resets at midnight UTC'
+                    : publicCooldown > 0
+                      ? `Next attempt in ${countdown(publicCooldown)}`
+                      : '1-minute observation'}
+              </span>
+            </div>
+          )}
           {view === 'arena' && (
             <>
               <div className="metrics">
@@ -532,7 +585,11 @@ export default function App() {
                       </div>
                       <h3>The first forecast is still unwritten.</h3>
                       <div className="empty-meta">No commitments · No results</div>
-                      <button className="secondary-button" onClick={() => setModal(true)}>
+                      <button
+                        className="secondary-button"
+                        disabled={publicBlocked}
+                        onClick={() => setModal(true)}
+                      >
                         <Plus size={16} />
                         Open first round
                       </button>
@@ -575,15 +632,17 @@ export default function App() {
                       {round.lastError && (
                         <div className="worker-error">
                           <span>{round.lastError}</span>
-                          <button
-                            className="icon-button"
-                            disabled={busy}
-                            title="Retry round worker"
-                            aria-label="Retry round worker"
-                            onClick={retry}
-                          >
-                            <RefreshCw size={16} />
-                          </button>
+                          {operator && (
+                            <button
+                              className="icon-button"
+                              disabled={busy}
+                              title="Retry round worker"
+                              aria-label="Retry round worker"
+                              onClick={retry}
+                            >
+                              <RefreshCw size={16} />
+                            </button>
+                          )}
                         </div>
                       )}
                       <div className="tabs">
@@ -691,7 +750,7 @@ export default function App() {
                             Outcome evidence
                           </a>
                         )}
-                        {!['SETTLED', 'CANCELLED'].includes(round.phase) && (
+                        {operator && !['SETTLED', 'CANCELLED'].includes(round.phase) && (
                           <button
                             className="text-button danger"
                             onClick={() => setCancelId(round.id)}
@@ -860,7 +919,11 @@ export default function App() {
                 <div className="empty-state">
                   <History size={28} />
                   <h3>No rounds recorded yet.</h3>
-                  <button className="secondary-button" onClick={() => setModal(true)}>
+                  <button
+                    className="secondary-button"
+                    disabled={publicBlocked}
+                    onClick={() => setModal(true)}
+                  >
                     <Plus size={16} />
                     New round
                   </button>
@@ -993,7 +1056,13 @@ export default function App() {
               <div className="setting-row">
                 <div>
                   <h3>Operator access</h3>
-                  <span>{status?.authRequired ? 'Token required' : 'Local round controls'}</span>
+                  <span>
+                    {operator
+                      ? 'Operator verified'
+                      : token
+                        ? 'Token not recognized'
+                        : 'Admin controls only'}
+                  </span>
                 </div>
                 <form
                   className="token-form"
@@ -1001,6 +1070,7 @@ export default function App() {
                     e.preventDefault();
                     sessionStorage.setItem('arena-token', token);
                     setError('');
+                    void refresh();
                   }}
                 >
                   <input
@@ -1073,46 +1143,57 @@ export default function App() {
               </button>
             </div>
             <label className="field-label">Round mode</label>
-            <div className="mode-options">
-              <button
-                disabled={busy}
-                className={mode === 'practice' ? 'active' : ''}
-                onClick={() => setMode('practice')}
-              >
-                <Activity size={19} />
-                <b>Local practice</b>
-                <span>Statistical baselines · Real chain outcome</span>
-              </button>
-              <button
-                disabled={busy || !ready}
-                className={mode === 'onchain' ? 'active' : ''}
-                onClick={() => setMode('onchain')}
-              >
+            {reviewer ? (
+              <div className="readonly-mode">
                 <ShieldCheck size={19} />
                 <b>On-chain AI</b>
-                <span>
-                  {ready
-                    ? 'Groq forecasts · BOT commitments'
-                    : 'Requires model, wallet, and contract'}
-                </span>
-              </button>
-            </div>
+              </div>
+            ) : (
+              <div className="mode-options">
+                <button
+                  disabled={busy}
+                  className={mode === 'practice' ? 'active' : ''}
+                  onClick={() => setMode('practice')}
+                >
+                  <Activity size={19} />
+                  <b>Local practice</b>
+                  <span>Statistical baselines · Real chain outcome</span>
+                </button>
+                <button
+                  disabled={busy || !ready}
+                  className={mode === 'onchain' ? 'active' : ''}
+                  onClick={() => setMode('onchain')}
+                >
+                  <ShieldCheck size={19} />
+                  <b>On-chain AI</b>
+                  <span>
+                    {ready
+                      ? 'Groq forecasts · BOT commitments'
+                      : 'Requires model, wallet, and contract'}
+                  </span>
+                </button>
+              </div>
+            )}
             <label className="field-label" htmlFor="duration">
               Observation window
             </label>
             <select
               id="duration"
-              disabled={busy}
+              disabled={busy || reviewer}
               value={duration}
               onChange={(e) => setDuration(Number(e.target.value))}
             >
               <option value={60}>1 minute</option>
-              <option value={300}>5 minutes</option>
-              <option value={600}>10 minutes</option>
+              {!reviewer && (
+                <>
+                  <option value={300}>5 minutes</option>
+                  <option value={600}>10 minutes</option>
+                </>
+              )}
             </select>
             <div className="modal-summary">
               <span>Commit + reveal</span>
-              <b>{mode === 'practice' ? '40 seconds' : '3 minutes 30 seconds'}</b>
+              <b>{!reviewer && mode === 'practice' ? '40 seconds' : '3 minutes 30 seconds'}</b>
               <span>Outcome source</span>
               <b>BOT testnet blocks</b>
               <span>Scoring</span>
@@ -1125,7 +1206,7 @@ export default function App() {
             )}
             <button
               className="primary-button modal-submit"
-              disabled={busy || !status?.network.connected}
+              disabled={busy || !status?.network.connected || publicBlocked || (reviewer && !ready)}
               onClick={openRound}
             >
               {busy ? <LoaderCircle size={17} className="spin" /> : <Plus size={17} />}

@@ -9,6 +9,13 @@ import { createArena, type RoundStore } from '../shared/arena.js';
 import { createChain, type ChainConfig } from '../shared/chain.js';
 import { digest, phase, publicRound, type Round } from '../shared/domain.js';
 import { askModel } from '../shared/models.js';
+import {
+  PublicAccessError,
+  publicRoundStatus,
+  readRoundJson,
+  reservePublicRound,
+  type PublicUsage,
+} from '../shared/public-access.js';
 
 interface Env extends ChainConfig {
   ARENA: DurableObjectNamespace;
@@ -52,7 +59,8 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
     if (!['GET', 'POST'].includes(request.method))
       return Response.json({ error: 'Method not allowed.' }, { status: 405, headers });
-    if (request.method === 'POST' && !authorized(request, env.ADMIN_TOKEN)) {
+    const publicCreation = new URL(request.url).pathname === '/api/rounds';
+    if (request.method === 'POST' && !publicCreation && !authorized(request, env.ADMIN_TOKEN)) {
       return Response.json(
         { error: 'Enter the operator access token in Settings.' },
         { status: 401, headers },
@@ -89,6 +97,9 @@ export class ArenaWorker {
     sql.exec(
       'CREATE TABLE IF NOT EXISTS rounds (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, body TEXT NOT NULL)',
     );
+    sql.exec(
+      'CREATE TABLE IF NOT EXISTS public_usage (id INTEGER PRIMARY KEY CHECK(id = 1), body TEXT NOT NULL)',
+    );
     this.store = {
       save: (round) => {
         sql.exec(
@@ -116,6 +127,19 @@ export class ArenaWorker {
       this.chain,
       { ...env, deferSettlement: true },
       (model, context, seconds) => askModel(model, context, seconds, env.GROQ_API_KEY),
+    );
+  }
+
+  private publicUsage(): PublicUsage | undefined {
+    const row = this.ctx.storage.sql
+      .exec<{ body: string }>('SELECT body FROM public_usage WHERE id = 1')
+      .toArray()[0];
+    return row ? JSON.parse(row.body) : undefined;
+  }
+
+  private publicEnabled() {
+    return Boolean(
+      this.env.GROQ_API_KEY && this.env.DEPLOYER_PRIVATE_KEY && this.env.ARENA_CONTRACT_ADDRESS,
     );
   }
 
@@ -192,6 +216,8 @@ export class ArenaWorker {
             contract: Boolean(this.env.ARENA_CONTRACT_ADDRESS),
           },
           authRequired: true,
+          permissions: { operator: authorized(request, this.env.ADMIN_TOKEN) },
+          publicRounds: { ...publicRoundStatus(this.publicUsage()), enabled: this.publicEnabled() },
           chainId: 968,
           explorer: 'https://scan.bohr.life',
           contract: this.env.ARENA_CONTRACT_ADDRESS || null,
@@ -211,11 +237,22 @@ export class ArenaWorker {
         });
       }
       if (request.method === 'POST') {
-        if (!authorized(request, this.env.ADMIN_TOKEN))
-          return Response.json({ error: 'Operator authentication required.' }, { status: 401 });
         if (path === '/api/rounds') {
-          const input = roundInput.parse(await request.json());
+          const input = roundInput.parse(await readRoundJson(request));
           const round = await this.arena.exclusive(async () => {
+            if (!authorized(request, this.env.ADMIN_TOKEN)) {
+              const usage = reservePublicRound(
+                input,
+                this.publicUsage(),
+                this.store.all().some((r) => !['SETTLED', 'CANCELLED'].includes(phase(r))),
+                this.publicEnabled(),
+              );
+              // Reserve before model calls; failed attempts still consume the bounded public budget.
+              this.ctx.storage.sql.exec(
+                'INSERT INTO public_usage VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET body = excluded.body',
+                JSON.stringify(usage),
+              );
+            }
             await this.ctx.storage.setAlarm(Date.now() + 30_000);
             try {
               return await this.arena.createRound(input.mode, input.duration);
@@ -225,6 +262,8 @@ export class ArenaWorker {
           });
           return Response.json(publicRound(round), { status: 201 });
         }
+        if (!authorized(request, this.env.ADMIN_TOKEN))
+          return Response.json({ error: 'Operator authentication required.' }, { status: 401 });
         const cancel = /^\/api\/rounds\/([^/]+)\/cancel$/.exec(path);
         if (cancel) {
           await this.arena.exclusive(async () => {
@@ -275,6 +314,18 @@ export class ArenaWorker {
       }
       return Response.json({ error: 'Not found.' }, { status: 404 });
     } catch (error) {
+      if (error instanceof PublicAccessError) {
+        const headers = new Headers();
+        if (error.retryAt)
+          headers.set(
+            'Retry-After',
+            String(Math.max(1, Math.ceil((error.retryAt - Date.now()) / 1000))),
+          );
+        return Response.json(
+          { error: error.message, retryAt: error.retryAt },
+          { status: error.status, headers },
+        );
+      }
       const message =
         error instanceof z.ZodError
           ? 'Invalid request.'

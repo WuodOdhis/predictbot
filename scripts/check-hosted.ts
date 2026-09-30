@@ -7,21 +7,53 @@ import { createChain } from '../shared/chain.js';
 
 const config = dotenv.parse(readFileSync('.env', 'utf8'));
 const url = process.env.HOSTED_API_URL || 'https://predictbot-api.newtonesila.workers.dev';
-assert.ok(config.ADMIN_TOKEN, 'Local operator token is missing.');
-const unauthenticated = await fetch(`${url}/api/rounds`, {
+const publicReview = process.env.PUBLIC_REVIEW === '1';
+if (!publicReview) assert.ok(config.ADMIN_TOKEN, 'Local operator token is missing.');
+const unauthenticated = await fetch(`${url}/api/worker/retry`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ mode: 'practice', duration: 60 }),
 });
 assert.equal(unauthenticated.status, 401);
+const before = (await (await fetch(`${url}/api/status`)).json()) as any;
+if (publicReview) {
+  const invalid = await fetch(`${url}/api/rounds`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'onchain', duration: 600 }),
+  });
+  assert.equal(invalid.status, 403);
+}
 const response = await fetch(`${url}/api/rounds`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.ADMIN_TOKEN}` },
+  headers: {
+    'Content-Type': 'application/json',
+    ...(!publicReview ? { Authorization: `Bearer ${config.ADMIN_TOKEN}` } : {}),
+  },
   body: JSON.stringify({ mode: 'onchain', duration: 60 }),
   signal: AbortSignal.timeout(120_000),
 });
 assert.equal(response.status, 201, `Round creation failed: HTTP ${response.status}.`);
 const created = (await response.json()) as any;
+if (publicReview) {
+  const competing = await fetch(`${url}/api/rounds`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'onchain', duration: 60 }),
+  });
+  assert.equal(competing.status, 409);
+  const after = (await (await fetch(`${url}/api/status`)).json()) as any;
+  assert.equal(after.publicRounds.remaining, before.publicRounds.remaining - 1);
+  assert.equal(after.permissions.operator, false);
+  for (const path of [`/api/rounds/${created.id}/cancel`, '/api/operator/import']) {
+    const denied = await fetch(`${url}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(denied.status, 401);
+  }
+}
 assert.ok(created.forecasts.every((f: any) => f.value === undefined && f.revealSalt === undefined));
 console.log(
   JSON.stringify({ created: created.id, chainRoundId: created.chainRoundId, phase: created.phase }),

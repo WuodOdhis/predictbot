@@ -89,7 +89,9 @@ Persist and back up `data/arena.sqlite` together with its WAL files when applica
 - A single SQLite-backed Durable Object stores rounds and serializes the operator's transactions. Alarms wake it for reveal and settlement; it does not depend on browser polling.
 - The local server and hosted worker use the same round engine in `shared/`. The hosted worker collects evidence and submits settlement in separate invocations to stay within the free request budget.
 - The Vercel website proxies `/api/*` to Cloudflare. No signing key or model API key is uploaded to Vercel. `.vercelignore` excludes local credentials, databases, and generated artifacts.
-- Cloudflare mutations require `ADMIN_TOKEN`. The token is stored in the local `.env`; enter it in the website's Settings to operate rounds. Never use a wallet private key or Groq API key in that field.
+- Public `POST /api/rounds` accepts only `{ "mode": "onchain", "duration": 60 }` without a token. It reserves a durable daily quota before model calls, permits one active round, enforces a 60-second cooldown, and caps anonymous attempts at 12 per UTC day across all visitors. Failure does not refund an attempt. Validation failures and requests blocked by an existing active round do not consume quota. The server reports `Retry-After` for exhausted quota or cooldown.
+- Other Cloudflare mutations require `ADMIN_TOKEN`, including cancellation, worker retry, and data import. An authenticated operator can use all round modes and durations without spending the public allowance. The token is stored in the local `.env`; enter it in Settings for administrative controls. Never use a wallet private key or Groq API key in that field.
+- Public quota is stored in the Durable Object's `public_usage` SQL table, so restarts and deployments do not reset it. The local server uses the same policy and stores its own quota in SQLite.
 - Only listed `ALLOWED_ORIGINS` may make browser requests. Public reads do not require an operator token.
 - Cloudflare's free tier has usage limits. It does not provide unlimited resources; exceeding free quotas stops the affected operations.
 
@@ -104,4 +106,4 @@ The configuration script uploads only the model key, testnet signing key, operat
 
 Update the API destination in `vercel.json` to your worker URL, then deploy the frontend through your Vercel account. Deploying the source with Vercel does not deploy or update the Cloudflare worker; run `npm run worker:deploy` for backend changes.
 
-`scripts/migrate-rounds.ts` imports closed local rounds into the hosted backend. `scripts/check-hosted.ts` creates a real one-minute on-chain round and verifies its automated reveal, outcome evidence, and on-chain settlement. Both use the local operator token and default to this project's worker URL; override with `HOSTED_API_URL` for your own deployment.
+`scripts/migrate-rounds.ts` imports closed local rounds into the hosted backend using the operator token. `scripts/check-hosted.ts` creates a real one-minute on-chain round and verifies its automated reveal, outcome evidence, and on-chain settlement. Set `PUBLIC_REVIEW=1` to verify anonymous creation and protected admin endpoints without sending an operator token. The check spends one public attempt in that mode. Both scripts default to this project's worker URL; override with `HOSTED_API_URL` for your own deployment.

@@ -5,9 +5,14 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { cancelRound, createRound, exclusive, tick } from './arena.js';
-import { publicRound } from './domain.js';
+import { phase, publicRound } from './domain.js';
 import { rpc } from './chain.js';
 import * as store from './store.js';
+import {
+  PublicAccessError,
+  publicRoundStatus,
+  reservePublicRound,
+} from '../shared/public-access.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -21,6 +26,16 @@ const configured = () => ({
   wallet: Boolean(process.env.DEPLOYER_PRIVATE_KEY),
   contract: Boolean(process.env.ARENA_CONTRACT_ADDRESS),
 });
+function isOperator(req: express.Request) {
+  const token = process.env.ADMIN_TOKEN;
+  if (!token)
+    return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '');
+  const supplied = req.get('authorization')?.replace(/^Bearer /, '') || '';
+  const a = Buffer.from(supplied),
+    b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+const publicEnabled = () => Object.values(configured()).every(Boolean);
 const samples: { block: string; timestamp: number; transactions: number }[] = [];
 let network: { connected: boolean; blockNumber?: string; timestamp?: number; checkedAt?: number } =
   { connected: false };
@@ -50,12 +65,14 @@ async function checkNetwork() {
     checkingNetwork = false;
   }
 }
-app.get('/api/status', (_req, res) =>
+app.get('/api/status', (req, res) =>
   res.json({
     network,
     samples,
     configured: configured(),
     authRequired: Boolean(process.env.ADMIN_TOKEN),
+    permissions: { operator: isOperator(req) },
+    publicRounds: { ...publicRoundStatus(store.getPublicUsage()), enabled: publicEnabled() },
     chainId: 968,
     explorer: 'https://scan.bohr.life',
     contract: process.env.ARENA_CONTRACT_ADDRESS || null,
@@ -86,11 +103,15 @@ app.use('/api', (req, res, next) => {
     } catch {
       return res.status(403).json({ error: 'Invalid request origin.' });
     }
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(host) && !process.env.ADMIN_TOKEN)
+    if (
+      !['localhost', '127.0.0.1', '[::1]'].includes(host) &&
+      (!process.env.ADMIN_TOKEN || !isOperator(req))
+    )
       return res
         .status(403)
         .json({ error: 'Remote round controls require ADMIN_TOKEN on the server.' });
   }
+  if (req.method === 'POST' && req.path === '/rounds') return next();
   const token = process.env.ADMIN_TOKEN;
   if (token) {
     const supplied = req.get('authorization')?.replace(/^Bearer /, '') || '';
@@ -117,7 +138,18 @@ const roundInput = z
 app.post('/api/rounds', async (req, res, next) => {
   try {
     const input = roundInput.parse(req.body);
-    const round = await exclusive(() => createRound(input.mode, input.duration));
+    const round = await exclusive(async () => {
+      if (!isOperator(req)) {
+        const usage = reservePublicRound(
+          input,
+          store.getPublicUsage(),
+          store.all().some((r) => !['SETTLED', 'CANCELLED'].includes(phase(r))),
+          publicEnabled(),
+        );
+        store.savePublicUsage(usage);
+      }
+      return createRound(input.mode, input.duration);
+    });
     res.status(201).json(publicRound(round));
   } catch (error) {
     next(error);
@@ -145,6 +177,15 @@ if (existsSync('dist/index.html')) {
 }
 app.use(
   (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (error instanceof PublicAccessError) {
+      if (error.retryAt)
+        res.setHeader(
+          'Retry-After',
+          String(Math.max(1, Math.ceil((error.retryAt - Date.now()) / 1000))),
+        );
+      res.status(error.status).json({ error: error.message, retryAt: error.retryAt });
+      return;
+    }
     const message =
       error instanceof z.ZodError
         ? 'Choose a supported round mode and duration.'

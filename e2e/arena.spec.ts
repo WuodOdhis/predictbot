@@ -1,5 +1,14 @@
 import { test, expect } from '@playwright/test';
+import 'dotenv/config';
 import { encodeAbiParameters, keccak256, stringToHex, type Hex } from 'viem';
+
+test.beforeEach(async ({ page }) => {
+  if (process.env.ADMIN_TOKEN)
+    await page.addInitScript(
+      (token) => sessionStorage.setItem('arena-token', token),
+      process.env.ADMIN_TOKEN,
+    );
+});
 
 test('real testnet practice lifecycle: hidden forecasts, reveal proofs, evidence and leaderboard', async ({
   page,
@@ -13,7 +22,10 @@ test('real testnet practice lifecycle: hidden forecasts, reveal proofs, evidence
   const existing = await (await request.get('/api/rounds')).json();
   expect(existing.filter((r: any) => !['SETTLED', 'CANCELLED'].includes(r.phase))).toHaveLength(0);
   await page.getByRole('button', { name: 'New round', exact: true }).click();
-  await expect(page.getByRole('button', { name: /On-chain AI/ })).toBeDisabled();
+  const status = await (await request.get('/api/status')).json();
+  if (Object.values(status.configured).every(Boolean))
+    await expect(page.getByRole('button', { name: /On-chain AI/ })).toBeEnabled();
+  else await expect(page.getByRole('button', { name: /On-chain AI/ })).toBeDisabled();
   await page.getByRole('button', { name: 'Open round', exact: true }).click();
   await expect(page.getByText('Sealed forecast')).toHaveCount(2, { timeout: 30_000 });
   const initial = await (await request.get('/api/rounds')).json();

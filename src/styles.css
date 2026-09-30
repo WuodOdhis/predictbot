@@ -280,6 +280,28 @@ main {
 .page-heading .eyebrow {
   margin-bottom: 9px;
 }
+.public-capacity {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: #76837c;
+  margin: -12px 0 23px;
+}
+.public-capacity b {
+  font-weight: 600;
+  color: #345a43;
+  margin: 0 5px;
+}
+.readonly-mode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  color: #347d58;
+  font-size: 13px;
+}
 .primary-button,
 .secondary-button,
 .danger-button {
