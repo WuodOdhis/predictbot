@@ -70,6 +70,7 @@ test('reviewer opens a fixed AI round without credentials; admin controls requir
   await expect(page.getByRole('button', { name: /Local practice/ })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open round', exact: true }).click();
   await expect(page.getByText('Sealed forecast')).toHaveCount(2);
+  await expect(page.getByText('Round in progress', { exact: true })).toBeVisible();
   expect(submitted).toEqual({ mode: 'onchain', duration: 60 });
   expect(creationAuthorization).toBeUndefined();
   await expect(page.getByRole('button', { name: 'Cancel round', exact: true })).toHaveCount(0);

@@ -491,11 +491,13 @@ export default function App() {
               <span>
                 {!publicAccess.enabled
                   ? 'AI rounds unavailable'
-                  : !publicAccess.remaining
-                    ? 'Resets at midnight UTC'
-                    : publicCooldown > 0
-                      ? `Next attempt in ${countdown(publicCooldown)}`
-                      : '1-minute observation'}
+                  : active
+                    ? 'Round in progress'
+                    : !publicAccess.remaining
+                      ? 'Resets at midnight UTC'
+                      : publicCooldown > 0
+                        ? `Next attempt in ${countdown(publicCooldown)}`
+                        : '1-minute observation'}
               </span>
             </div>
           )}
